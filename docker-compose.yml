@@ -1,0 +1,297 @@
+services:
+
+  mongodb:
+    image: mongo:7
+    container_name: food-delivery-mongodb
+    restart: unless-stopped
+
+    # Kept published (unlike the app services below) because README's
+    # "run without Docker" workflow has host-run services connect to this
+    # container directly — removing it would break that documented path.
+    # If you don't need that hybrid workflow, delete this ports block.
+    ports:
+      - "27017:27017"
+
+    volumes:
+      - mongodb_data:/data/db
+
+    networks:
+      - food-delivery-network
+
+  redis:
+    image: redis:7
+    container_name: food-delivery-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    command: redis-server --appendonly yes
+
+    volumes:
+      - redis_data:/data
+
+    networks:
+      - food-delivery-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: food-delivery-kafka
+    restart: unless-stopped
+
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+
+    environment:
+      # KRaft Settings
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Listeners
+      KAFKA_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://kafka:9093
+
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      # Controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # Cluster
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+      # Misc
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Fine for this dev setup — a production deployment should provision
+      # topics explicitly (partition count, replication factor) and turn
+      # this off, rather than let a typo'd topic name silently auto-create.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+    networks:
+      - food-delivery-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: food-delivery-kafka-ui
+    restart: unless-stopped
+
+    ports:
+      - "8081:8080"
+
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+    depends_on:
+      - kafka
+
+    networks:
+      - food-delivery-network
+
+  # ---- Application services ----
+  # Each of these has a small startup race against Mongo/Redis/Kafka: a plain
+  # `depends_on` only waits for the container to *start*, not for the
+  # broker/database inside it to be ready to accept connections. mongoose.
+  # connect(...) and the Kafka client throw on first boot if they lose that
+  # race, which crashes the process — `restart: unless-stopped` just lets
+  # Docker retry the container until the dependency really is ready. (Swap
+  # this for real healthchecks + `condition: service_healthy` for a cleaner
+  # boot instead of a few visible restarts on first `up`.)
+  #
+  # BUG-046: none of the five backend services below publish a host port
+  # anymore. Every legitimate caller reaches them through the gateway
+  # (http://localhost:8080) or, service-to-service, over the internal
+  # Docker network by container name — nothing outside this compose file
+  # is supposed to call user-service:4001 etc. directly. If you need to
+  # curl one directly for debugging, temporarily add its `ports:` block
+  # back or use `docker compose exec <service> sh`.
+  #
+  # BUG-044/045: secrets are no longer hardcoded here — both are read from
+  # a root .env file (see .env.example) via ${...} substitution, which
+  # `docker compose` loads automatically from the same directory as this
+  # file.
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: food-delivery-gateway
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    environment:
+      PORT: 8080
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      REDIS_URL: redis://redis:6379
+      USER_SERVICE_URL: http://user-service:4001
+      RESTAURANT_SERVICE_URL: http://restaurant-service:4002
+      ORDER_SERVICE_URL: http://order-service:4003
+      AGENT_SERVICE_URL: http://agent-service:4004
+      NOTIFICATION_SERVICE_URL: http://notification-service:4005
+      FRONTEND_URL: http://localhost:5173
+
+    depends_on:
+      - redis
+      - user-service
+      - restaurant-service
+      - order-service
+      - agent-service
+
+    networks:
+      - food-delivery-network
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: food-delivery-user-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 4001
+      MONGO_URI: mongodb://mongodb:27017/food_delivery
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      FRONTEND_URL: http://localhost:5173
+
+    depends_on:
+      - mongodb
+
+    networks:
+      - food-delivery-network
+
+  restaurant-service:
+    build:
+      context: .
+      dockerfile: services/restaurant-service/Dockerfile
+    container_name: food-delivery-restaurant-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 4002
+      MONGO_URI: mongodb://mongodb:27017/food_delivery
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      FRONTEND_URL: http://localhost:5173
+
+    depends_on:
+      - mongodb
+      - redis
+      - kafka
+
+    networks:
+      - food-delivery-network
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    container_name: food-delivery-order-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 4003
+      MONGO_URI: mongodb://mongodb:27017/food_delivery
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      FRONTEND_URL: http://localhost:5173
+      USER_SERVICE_URL: http://user-service:4001
+      RESTAURANT_SERVICE_URL: http://restaurant-service:4002
+      AGENT_SERVICE_URL: http://agent-service:4004
+      NOTIFICATION_SERVICE_URL: http://notification-service:4005
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+
+    depends_on:
+      - mongodb
+      - redis
+      - kafka
+
+    networks:
+      - food-delivery-network
+
+  agent-service:
+    build:
+      context: .
+      dockerfile: services/agent-service/Dockerfile
+    container_name: food-delivery-agent-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 4004
+      MONGO_URI: mongodb://mongodb:27017/food_delivery
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET}
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      FRONTEND_URL: http://localhost:5173
+
+    depends_on:
+      - mongodb
+      - redis
+      - kafka
+
+    networks:
+      - food-delivery-network
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: food-delivery-notification-service
+    restart: unless-stopped
+
+    environment:
+      PORT: 4005
+      JWT_SECRET: ${JWT_SECRET}
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+
+    depends_on:
+      - redis
+      - kafka
+
+    networks:
+      - food-delivery-network
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: food-delivery-frontend
+    restart: unless-stopped
+
+    command: npm run dev -- --host 0.0.0.0
+
+    ports:
+      - "5173:5173"
+
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080/api
+      VITE_SOCKET_URL: http://localhost:8080
+
+    depends_on:
+      - gateway
+
+    networks:
+      - food-delivery-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  kafka_data:
+
+networks:
+  food-delivery-network:
+    driver: bridge

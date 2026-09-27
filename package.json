@@ -1,0 +1,16 @@
+{
+  "name": "food-delivery-microservices",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "gateway",
+    "services/*",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "echo Use docker compose up --build",
+    "seed": "node scripts/seed-all.js",
+    "test:tracking": "node --test --test-force-exit services/agent-service/test/liveTracking.test.js gateway/test/liveTracking.test.js",
+    "test:gateway": "npm --workspace=gateway test"
+  }
+}
