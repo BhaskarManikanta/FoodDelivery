@@ -1,255 +1,200 @@
-# Food Delivery Backend — Microservices Architecture
+# Food Delivery Microservices
 
-A food delivery platform built with **Node.js, Express.js, MongoDB, Kafka, Redis, Socket.IO, and Docker Compose**. The system separates core responsibilities into independent services and supports order processing, restaurant decisions, agent assignment, and real-time delivery tracking.
+An event-driven food ordering platform built with **React, Node.js, MongoDB, Redis, Kafka, Socket.IO and Docker Compose**. It is designed around failure handling, not just the happy path: a choreography-based saga with compensating actions, a transactional outbox for reliable Kafka publishing, idempotent consumers, dead-letter queues, and atomic delivery-agent reservation.
 
 ## Screenshots
 
-### Login
-![Login page](./screenshots/Login.png)
+| Login | Home |
+|---|---|
+| ![Login](screenshots/Login.png) | ![Home](screenshots/Home.png) |
 
-### Home
-![Home page](./screenshots/Home.png)
+| Restaurant Menu | Orders |
+|---|---|
+| ![Menu](screenshots/Menu.png) | ![Orders](screenshots/Orders.png) |
 
-### Restaurant Menu
-![Menu page](./screenshots/Menu.png)
+**Live Order Tracking**
 
-### Orders
-![Orders page](./screenshots/Orders.png)
+![Live order tracking](screenshots/Tracking.png)
 
-### Live Order Tracking
-![Live order tracking](./screenshots/Tracking.png)
 
 ## Architecture
 
-- **API Gateway:** Routes requests to backend services, handles authentication, applies rate limiting, and relays real-time updates.
-- **User Service:** Manages registration, login, and user profiles.
-- **Restaurant Service:** Manages restaurants, menus, and restaurant-side order operations.
-- **Order Service:** Creates orders, validates prices, manages order status transitions, and coordinates order events.
-- **Agent Service:** Manages delivery agents, location updates, and agent assignment.
-- **Notification Service:** Processes events for order-related notifications.
-- **Apache Kafka:** Enables asynchronous communication between services.
-- **Redis:** Supports geospatial agent discovery, atomic agent reservation, caching, and real-time location distribution.
-- **MongoDB:** Stores application data.
-- **Socket.IO:** Provides authenticated, real-time order tracking.
-
-## Key Features
-
-- Microservices-based backend architecture.
-- JWT authentication and protected endpoints.
-- Restaurant menu and order management.
-- Server-side price validation during order creation.
-- Order creation idempotency using an idempotency key and a unique database index.
-- Event-driven communication using Kafka.
-- Transactional outbox pattern for reliable event publication.
-- Idempotent Kafka consumers to reduce duplicate processing.
-- Retry mechanisms and dead-letter queues (DLQs).
-- Saga-style coordination with compensating actions for failures.
-- Redis GEO for finding nearby delivery agents.
-- Redis Lua scripts for atomic agent reservation.
-- Agent location updates and real-time order tracking using Socket.IO.
-- Docker Compose for running the application infrastructure and services.
-
-## Order Lifecycle
-
-1. A customer creates an order through the API Gateway.
-2. The Order Service validates the request and calculates prices on the server.
-3. The order and its outbox event are written atomically.
-4. The outbox relay publishes the event to Kafka.
-5. The Restaurant Service processes the order and accepts or rejects it.
-6. When accepted, the Agent Service searches for a nearby available agent and attempts to reserve one.
-7. Order status and assignment events are communicated through Kafka.
-8. The customer receives real-time tracking updates through Socket.IO.
-9. If the restaurant rejects the order or no agent is available, the Order Service can cancel the order through a compensating action.
-
-## Reliability and Failure Handling
-
-### Transactional Outbox
-
-The Order Service records state changes and corresponding events in the same atomic MongoDB document update. A relay publishes pending events to Kafka and retries failures, marking events as failed after five attempts.
-
-If Kafka publication succeeds but the relay crashes before marking an event as sent, the event may be published again. Idempotent consumers help prevent duplicate business processing.
-
-### Consumer Retries and Dead-Letter Queues
-
-Kafka consumers use idempotency checks and retry failed processing. After three failed attempts, an event is sent to the corresponding dead-letter topic, named using the original topic plus `.dlq`.
-
-Dead-letter queues preserve failed events for later investigation; they do not automatically guarantee successful reprocessing.
-
-### Agent Assignment
-
-Redis GEO helps identify nearby agents. A Redis Lua script performs the availability check and reservation atomically, reducing the risk of assigning the same agent to multiple orders concurrently.
-
-### Order Creation Idempotency
-
-An idempotency key, scoped to the user through a unique compound index, helps prevent duplicate orders when the same logical request is submitted more than once.
-
-## Technology Stack
-
-| Area | Technologies |
+| Component | Responsibility |
 |---|---|
-| Backend | Node.js, Express.js |
-| Database | MongoDB, Mongoose |
-| Messaging | Apache Kafka |
-| Caching and geospatial search | Redis |
-| Real-time communication | Socket.IO |
-| Authentication | JWT |
-| API Gateway | Express, HTTP proxy middleware |
-| Infrastructure | Docker, Docker Compose |
-| Testing | Automated service tests, manual API checks |
+| **Frontend** | React, Redux Toolkit (cart), React Router, Axios, Socket.IO client |
+| **API Gateway** | Express proxy with JWT auth (including Socket.IO handshake auth), Redis-backed tiered rate limiting, and the single client-facing Socket.IO server for live tracking |
+| **User Service** | Customer registration, login, JWT issuing, and an internal-secret-gated path for creating restaurant/agent accounts |
+| **Restaurant Service** | Restaurant and menu CRUD, Redis-cached paginated reads, and a Kafka consumer that accepts or rejects new orders |
+| **Order Service** | Owns the order lifecycle through an explicit state machine, computes prices server-side, and publishes events through a transactional outbox |
+| **Agent Service** | Redis GEO for agent locations, atomic nearest-agent reservation (Lua script) with a self-expiring lease |
+| **Notification Service** | Consumes lifecycle events and simulates email/push/SMS notifications, with duplicate-delivery protection |
+| **Infrastructure** | MongoDB, Redis, Kafka (KRaft mode), Kafka UI, all via Docker Compose |
+
+## Order Lifecycle (Saga)
+
+There is no distributed transaction in this system: no two-phase commit and no cross-service database transaction. Each service performs one local atomic step and publishes an event describing it. Nothing orchestrates the whole flow from a single place; each service reacts only to the events it receives. Every event carries a `sagaId` (the order's id).
+
+```
+Order Service        Restaurant Service        Agent Service
+     |                       |                        |
+create order + outbox        |                        |
+     |--- ORDER_CREATED ---->|                        |
+     |                  accept / reject               |
+     |<-- RESTAURANT_ACCEPTED / REJECTED -------------|
+     |                       |--- (accepted) -------->|
+     |                       |                search + reserve agent
+     |<---------------------------- AGENT_ASSIGNED / NO_AGENT_AVAILABLE
+     |
+apply state transition + broadcast live status
+```
+
+**Failure is handled with compensating actions, not rollback.** If the restaurant rejects the order, or no agent is available, the Order Service moves the order to `CANCELLED` and queues an `ORDER_CANCELLED` event so the customer is notified and any reserved agent is released.
+
+**Race-safe state changes.** Every status change, whether from a Kafka event or a REST call, goes through one function that validates the transition against the state machine and then writes it with a MongoDB `findOneAndUpdate` conditioned on the status that was just read. If a concurrent request changed the status first, the write matches nothing and the caller receives `409` instead of overwriting the other decision. This closes the classic cancel-vs-accept race.
+
+## Reliability Mechanisms
+
+- **Transactional outbox (Order Service).** Each event is written in the same atomic MongoDB update as the state change that produced it. A background relay publishes pending events to Kafka with retry and backoff, and marks an event `FAILED` after 5 attempts. A Kafka outage delays downstream processing but does not lose the event.
+- **Idempotent consumers.** Each consumer checks whether a message was already processed, and marks it processed only *after* its business logic succeeds. If a consumer crashes mid-processing, Kafka redelivers the message and it is retried safely. The relay can publish a duplicate if it crashes after publishing but before marking an event sent, so consumers must tolerate duplicates.
+- **Dead-letter queues.** After 3 failed attempts (with backoff), a message is published to `<topic>.dlq` along with the failure reason. DLQs preserve failed events for investigation; they do not reprocess automatically.
+- **Atomic agent reservation with a lease.** A Redis Lua script checks availability and claims the agent in one indivisible operation, so two orders cannot reserve the same agent. The claim has a 2-hour TTL, renewed on each location update from an active agent, so a crashed agent app does not stay "busy" forever.
+- **Order-creation idempotency.** `POST /api/orders` accepts an `idempotencyKey`. Replaying the same key for the same user returns the original order, enforced by a unique compound index.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js and npm
-- Docker and Docker Compose
-- Git
+Docker and Docker Compose, Node.js and npm (for the seed script), and Git.
 
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/BhaskarManikanta/FoodDelivery_Backend.git
-cd FoodDelivery_Backend
+git clone https://github.com/BhaskarManikanta/FoodDelivery.git
+cd FoodDelivery
 ```
 
-### 2. Configure environment variables
+### 2. Configure environment
 
-Create the required `.env` files for the services using the repository's environment configuration and documentation.
+```bash
+cp .env.example .env
+```
 
-Configure MongoDB, Redis, Kafka, JWT secrets, service URLs, and the shared `INTERNAL_SERVICE_SECRET` as required. Internal services must use the same configured secret.
+Edit `.env` and set `JWT_SECRET` and `INTERNAL_SERVICE_SECRET`. Generate secure values with:
 
-Do not commit real credentials or production secrets.
+```bash
+openssl rand -hex 32
+```
 
-### 3. Start the application
+Never commit real secrets.
 
-Use the Docker Compose configuration provided by the repository:
+### 3. Start everything
 
 ```bash
 docker compose up --build
 ```
 
-If the project requires database initialization, run its seed script according to the repository instructions after configuring the environment.
+The first boot can take 30-60 seconds while Kafka elects a leader; the app services restart automatically until Kafka and MongoDB are reachable.
 
 ### 4. Seed demo data
 
-The repository includes a seed-all script that creates demo data, including a restaurant and an available delivery agent.
+```bash
+INTERNAL_SERVICE_SECRET=<value from your .env> node scripts/seed-all.js
+```
 
-Use the documented seed command and ensure the required services and databases are running before executing it.
+This creates the demo accounts below, a restaurant ("Spice Route") with two menu items, and an online delivery agent near it, so you can place an order immediately.
 
-### Demo Accounts
+### 5. Open the app
 
-The seed configuration provides these demo accounts:
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:5173 |
+| API Gateway | http://localhost:8080 |
+| Kafka UI (topics, messages, DLQs) | http://localhost:8081 |
+
+Only these three publish host ports. The backend services and databases are reachable only on the internal Docker network.
+
+### Demo accounts (local development only)
 
 | Role | Email | Password |
 |---|---|---|
-| Customer | `customer@example.com` | `password123` |
-| Restaurant | `restaurant@example.com` | `password123` |
-| Delivery Agent | `agent@example.com` | `password123` |
+| Customer | customer@example.com | password123 |
+| Restaurant | restaurant@example.com | password123 |
+| Delivery Agent | agent@example.com | password123 |
 
-These credentials are for local development and testing only.
+### Running without Docker
+
+Start MongoDB, Redis and Kafka (for example `docker compose up mongodb redis kafka kafka-ui`), then run each service in its own terminal:
+
+```bash
+cd services/user-service && npm install && npm run dev
+cd services/restaurant-service && npm install && npm run dev
+cd services/order-service && npm install && npm run dev
+cd services/agent-service && npm install && npm run dev
+cd services/notification-service && npm install && npm run dev
+cd gateway && npm install && npm run dev
+cd frontend && npm install && npm run dev
+```
+
+## Kafka Topics
+
+Every topic also has a `<topic>.dlq` counterpart. Each consuming service uses its own consumer group.
+
+| Topic | Producer | Consumers |
+|---|---|---|
+| `order-created` | order-service (outbox) | restaurant, notification |
+| `restaurant-accepted` | restaurant-service | agent, order, notification |
+| `restaurant-rejected` | restaurant-service | order, notification |
+| `agent-assigned` | agent-service | order, notification |
+| `no-agent-available` | agent-service | order, notification |
+| `order-picked-up` | order-service (outbox) | notification |
+| `out-for-delivery` | order-service (outbox) | notification |
+| `order-delivered` | order-service (outbox) | notification, agent (releases agent) |
+| `delivery-failed` | order-service (outbox) | notification, agent (releases agent) |
+| `order-cancelled` | order-service (outbox) | notification, agent (releases agent) |
 
 ## API Overview
 
-All client-facing endpoints are accessed through the API Gateway.
+All requests go through the gateway at `http://localhost:8080`. Rate limits (Redis-backed): 10 requests/min/IP on login and register, 100 requests/min/IP elsewhere.
 
-### Authentication
+| Area | Endpoints |
+|---|---|
+| **Auth** | `POST /api/users/register` (customer only), `POST /api/users/register-staff` (internal secret), `POST /api/users/login`, `GET /api/users/profile` |
+| **Restaurants** | `GET /api/restaurants`, `GET /api/restaurants/search?q=`, `GET /api/restaurants/:id`, `GET /api/restaurants/mine`, `POST/PATCH/DELETE /api/restaurants[/:id]`, menu CRUD under `/api/restaurants/:restaurantId/menu` (restaurant role, owner only) |
+| **Orders** | `POST /api/orders`, `GET /api/orders/my-orders`, `GET /api/orders/restaurant/mine`, `GET /api/orders/agent/mine`, `GET /api/orders/:id` (owner-scoped), `PATCH /api/orders/:id/status` (assigned agent), `PATCH /api/orders/:id/cancel` (customer, while cancellable) |
+| **Agents** | `PUT /api/agents/profile`, `GET /api/agents/profile/me`, `PATCH /api/agents/status`, `PATCH /api/agents/location` |
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/users/register` | Register a user |
-| POST | `/api/users/login` | Authenticate a user |
-| GET | `/api/users/profile` | Get the authenticated user's profile |
+Order creation body: `{ restaurantId, items: [{ menuItemId, quantity }], deliveryAddress, idempotencyKey? }`. Prices are always computed on the server.
 
-### Restaurants
+## Security
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/restaurants` | List restaurants |
-| GET | `/api/restaurants/search?q=` | Search restaurants |
-| GET | `/api/restaurants/:id` | Get restaurant details |
-| GET | `/api/restaurants/mine` | Get the restaurant user's restaurant |
-| POST | `/api/restaurants` | Create a restaurant |
-| PATCH | `/api/restaurants/:id` | Update a restaurant |
-| DELETE | `/api/restaurants/:id` | Delete a restaurant |
-
-### Orders
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/orders` | Create an order |
-| GET | `/api/orders/my-orders` | List customer orders |
-| GET | `/api/orders/restaurant/mine` | List restaurant orders |
-| GET | `/api/orders/agent/mine` | List agent orders |
-| GET | `/api/orders/:id` | Get order details |
-| PATCH | `/api/orders/:id/status` | Update order status |
-| PATCH | `/api/orders/:id/cancel` | Cancel an order |
-
-### Delivery Agents
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| PUT | `/api/agents/profile` | Create or update agent profile |
-| GET | `/api/agents/profile/me` | Get agent profile |
-| PATCH | `/api/agents/status` | Update agent availability |
-| PATCH | `/api/agents/location` | Update agent location |
-
-Some endpoints require specific roles or internal-service authentication. Consult the service routes for exact request bodies, validation rules, and authorization requirements.
-
-## Kafka Events
-
-The application uses Kafka topics to coordinate asynchronous workflows. Topics include:
-
-- `order-created`
-- `restaurant-accepted`
-- `restaurant-rejected`
-- `agent-assigned`
-- `no-agent-available`
-- `order-picked-up`
-- `out-for-delivery`
-- `order-delivered`
-- `delivery-failed`
-- `order-cancelled`
-
-Corresponding dead-letter topics use the `.dlq` suffix.
+- JWT authentication with role-based access (customer, restaurant, agent).
+- Socket.IO requires a valid JWT on the handshake, and joining an order's tracking room re-checks that the user may view that specific order.
+- No client-writable path into tracking rooms: live updates come only from trusted server-side Redis pub/sub publishes.
+- Internal endpoints (`register-staff`, agent assign/nearby) require an `x-internal-secret` header. This shared secret is a lightweight stand-in suited to one trusted Docker network; production would use per-service credentials or a service mesh.
+- Prices are never taken from the client, and order status changes are restricted to the owner or assigned agent.
+- Secrets come from a gitignored `.env`, not from source code.
 
 ## Testing
 
-The repository contains automated tests for the following services:
+| Service | Tests | Notes |
+|---|---|---|
+| User Service | 5 | Register/login, database mocked |
+| Order Service | 16 | State machine, pricing, ownership checks, database mocked |
+| Agent Service | 5 | Nearest-agent reservation against a real Redis (must be running on `localhost:6379`) |
 
-- **User Service:** 5 tests
-- **Order Service:** 16 tests
-- **Agent Service:** 5 tests
-
-The Agent Service tests require Redis to be available. The Restaurant Service and Notification Service do not currently have automated test suites documented here. API Gateway proxy behavior has been checked manually.
-
-Run each service's test command from its directory, using the scripts defined in that service's `package.json`. Ensure required environment variables and dependencies are configured before running tests.
-
-## Security Considerations
-
-- Protect private endpoints with authentication and authorization.
-- Use the shared internal-service secret only for trusted service-to-service communication.
-- Keep JWT secrets and database credentials out of source control.
-- Validate all incoming request data.
-- Do not trust client-submitted prices or unauthorized order-status changes.
-- Use the seeded credentials only in local development.
+Run `npm install && npm test` inside each service's directory. Restaurant Service, Notification Service and the gateway have no automated tests yet; gateway proxying was verified manually. There are no end-to-end saga tests yet.
 
 ## Current Scope and Limitations
 
-## Current Scope and Limitations
-
-- **Restaurant Order Decisions:** Restaurant order acceptance and rejection are currently handled automatically. A complete restaurant-facing workflow for manually reviewing, accepting, or rejecting incoming orders is not yet implemented.
-- **Automated Test Coverage:** Test coverage varies by service. The Restaurant Service and Notification Service do not currently have automated test suites documented in the repository.
-- **Payment Processing:** Payment gateway integration, payment verification, refunds, and payment reconciliation are not yet implemented.
-- **Notifications:** The Notification Service processes order-related events, but additional delivery channels such as email, SMS, and push notifications may require further implementation.
-- **Delivery Tracking:** Real-time agent location updates and order tracking are supported, but advanced features such as route visualization and estimated arrival times are not yet implemented.
-- **Deployment and Scaling:** The application supports Docker Compose for local development. Production-grade orchestration, independent service scaling, and comprehensive deployment automation remain future improvements.
-- **Distributed Processing:** The system uses event-driven communication, an outbox pattern, and idempotent consumers to improve reliability. These mechanisms do not guarantee exactly-once processing across the entire distributed workflow.
-- **API Documentation:** Interactive API documentation using Swagger/OpenAPI is a planned improvement.
-
-These limitations describe the current project scope and identify areas for future development.
+- **Restaurant decisions are automatic.** Orders are auto-accepted unless the restaurant is closed or not found. There is no restaurant-facing dashboard for manual accept/reject.
+- **No timeout for stuck orders.** If the Restaurant Service were down for an extended period, an order could remain in `RESTAURANT_PENDING` with nothing to auto-cancel it. A scheduled sweep or delayed-retry topic would address this.
+- **Notifications are simulated.** The Notification Service logs email/push/SMS messages; no real delivery channel is integrated.
+- **No payments.** There is no payment step, so there is no payment-failure path in the saga.
+- **Tracking is basic.** Live agent location and status updates work; route visualization and ETA do not.
+- **Single-instance infrastructure.** Kafka, MongoDB and Redis each run as one instance, which suits local development and demos. Production would need a multi-broker Kafka cluster, a MongoDB replica set, and Redis Sentinel or Cluster.
+- **Not exactly-once.** The outbox plus idempotent consumers give at-least-once delivery with duplicate protection, not exactly-once processing across the whole workflow.
+- **No OpenAPI/Swagger docs** yet.
 
 ## Author
 
-**Bhaskar Manikanta**
-
-GitHub: [BhaskarManikanta](https://github.com/BhaskarManikanta)
+**Bhaskar Manikanta**: [GitHub](https://github.com/BhaskarManikanta)S
