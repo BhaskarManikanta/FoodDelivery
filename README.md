@@ -235,10 +235,18 @@ Run each service's test command from its directory, using the scripts defined in
 
 ## Current Scope and Limitations
 
-- Automated test coverage varies by service.
-- Kafka delivery and consumer idempotency reduce duplicate-processing risks but do not make the entire distributed workflow exactly-once.
-- Failed events in dead-letter topics may require manual inspection and reprocessing.
-- Production deployment requires environment-specific configuration, monitoring, secret management, and operational hardening.
+## Current Scope and Limitations
+
+- **Restaurant Order Decisions:** Restaurant order acceptance and rejection are currently handled automatically. A complete restaurant-facing workflow for manually reviewing, accepting, or rejecting incoming orders is not yet implemented.
+- **Automated Test Coverage:** Test coverage varies by service. The Restaurant Service and Notification Service do not currently have automated test suites documented in the repository.
+- **Payment Processing:** Payment gateway integration, payment verification, refunds, and payment reconciliation are not yet implemented.
+- **Notifications:** The Notification Service processes order-related events, but additional delivery channels such as email, SMS, and push notifications may require further implementation.
+- **Delivery Tracking:** Real-time agent location updates and order tracking are supported, but advanced features such as route visualization and estimated arrival times are not yet implemented.
+- **Deployment and Scaling:** The application supports Docker Compose for local development. Production-grade orchestration, independent service scaling, and comprehensive deployment automation remain future improvements.
+- **Distributed Processing:** The system uses event-driven communication, an outbox pattern, and idempotent consumers to improve reliability. These mechanisms do not guarantee exactly-once processing across the entire distributed workflow.
+- **API Documentation:** Interactive API documentation using Swagger/OpenAPI is a planned improvement.
+
+These limitations describe the current project scope and identify areas for future development.
 
 ## Author
 
