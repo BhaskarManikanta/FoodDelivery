@@ -32,11 +32,16 @@ export const createRestaurant = asyncHandler(async (req, res) => {
 });
 
 export const getRestaurants = asyncHandler(async (req, res) => {
-  // BUG-040: unbounded results. Cache key includes the page so different
-  // pages don't collide on the same cached blob.
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
-  const cacheKey = `restaurants:all:${page}:${limit}`;
+  const cuisine = req.query.cuisine;
+  const isOpen = req.query.isOpen;
+
+  const filter = {};
+  if (cuisine) filter.cuisine = { $regex: cuisine, $options: 'i' };
+  if (isOpen !== undefined) filter.isOpen = isOpen === 'true';
+
+  const cacheKey = `restaurants:all:${page}:${limit}:${cuisine || 'any'}:${isOpen || 'any'}`;
 
   const cachedData = await redis.get(cacheKey);
   if (cachedData) {
@@ -44,11 +49,11 @@ export const getRestaurants = asyncHandler(async (req, res) => {
   }
 
   const [restaurants, total] = await Promise.all([
-    Restaurant.find()
+    Restaurant.find(filter)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
-    Restaurant.countDocuments()
+    Restaurant.countDocuments(filter)
   ]);
 
   const payload = { data: restaurants, page, limit, total };
@@ -58,7 +63,11 @@ export const getRestaurants = asyncHandler(async (req, res) => {
 });
 
 export const getMyRestaurants = asyncHandler(async (req, res) => {
-  const restaurants = await Restaurant.find({ ownerId: req.user.id }).sort({ createdAt: -1 });
+  const filter = req.user.role === 'admin' && req.query.all === 'true'
+    ? {}
+    : { ownerId: req.user.id };
+
+  const restaurants = await Restaurant.find(filter).sort({ createdAt: -1 });
 
   res.status(200).json({
     success: true,
@@ -102,11 +111,11 @@ export const updateRestaurant = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Restaurant not found' });
   }
 
-  if (restaurant.ownerId !== req.user.id) {
+  if (restaurant.ownerId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'You can only edit your own restaurant' });
   }
 
-  const { name, cuisine, address, image, isOpen, location } = req.body;
+  const { name, cuisine, address, image, isOpen, location, rating, deliveryTime, costForTwo, openingHours } = req.body;
 
   if (name !== undefined) restaurant.name = name;
   if (cuisine !== undefined) restaurant.cuisine = cuisine;
@@ -114,6 +123,10 @@ export const updateRestaurant = asyncHandler(async (req, res) => {
   if (image !== undefined) restaurant.image = image;
   if (isOpen !== undefined) restaurant.isOpen = isOpen;
   if (location !== undefined) restaurant.location = location;
+  if (rating !== undefined) restaurant.rating = rating;
+  if (deliveryTime !== undefined) restaurant.deliveryTime = deliveryTime;
+  if (costForTwo !== undefined) restaurant.costForTwo = costForTwo;
+  if (openingHours !== undefined) restaurant.openingHours = openingHours;
 
   await restaurant.save();
   await invalidateRestaurantCaches(restaurant._id);
@@ -128,7 +141,7 @@ export const deleteRestaurant = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Restaurant not found' });
   }
 
-  if (restaurant.ownerId !== req.user.id) {
+  if (restaurant.ownerId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'You can only delete your own restaurant' });
   }
 
@@ -148,7 +161,7 @@ export const addMenuItem = asyncHandler(async (req, res) => {
     });
   }
 
-  if (restaurant.ownerId !== req.user.id) {
+  if (restaurant.ownerId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({
       success: false,
       message: 'You can only edit your own restaurant'
@@ -176,7 +189,7 @@ export const updateMenuItem = asyncHandler(async (req, res) => {
     });
   }
 
-  if (restaurant.ownerId !== req.user.id) {
+  if (restaurant.ownerId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({
       success: false,
       message: 'You can only edit your own restaurant'
@@ -213,7 +226,7 @@ export const deleteMenuItem = asyncHandler(async (req, res) => {
     });
   }
 
-  if (restaurant.ownerId !== req.user.id) {
+  if (restaurant.ownerId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({
       success: false,
       message: 'You can only edit your own restaurant'

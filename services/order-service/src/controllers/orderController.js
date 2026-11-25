@@ -1,8 +1,45 @@
 import { randomUUID } from 'crypto';
 import mongoose from 'mongoose';
 import asyncHandler from 'express-async-handler';
+import Redis from 'ioredis';
 import Order from '../models/Order.js';
 import { applyTransition, TRANSITION_RESULT } from '../transitionOrder.js';
+
+let redisClient = null;
+const getRedis = () => {
+  if (!redisClient && process.env.REDIS_URL) {
+    try {
+      redisClient = new Redis(process.env.REDIS_URL, {
+        lazyConnect: true,
+        enableOfflineQueue: false
+      });
+      redisClient.on('error', () => {});
+    } catch {}
+  }
+  return redisClient;
+};
+
+const broadcastOrderStatus = async (order) => {
+  if (!order) return;
+  const redis = getRedis();
+  if (redis) {
+    try {
+      if (redis.status !== 'ready' && redis.status !== 'connecting') {
+        await redis.connect().catch(() => {});
+      }
+      await redis.publish(
+        'order-status-updates',
+        JSON.stringify({
+          orderId: order._id.toString(),
+          status: order.status,
+          updatedAt: order.updatedAt
+        })
+      );
+    } catch (err) {
+      // Non-blocking in tests or when Redis is briefly offline
+    }
+  }
+};
 
 const AGENT_STATUS_MAP = {
   PICKED_UP: { topic: 'order-picked-up', eventType: 'ORDER_PICKED_UP' },
@@ -97,15 +134,31 @@ export const createOrder = asyncHandler(async (req, res) => {
   }
 
   const orderId = new mongoose.Types.ObjectId();
+  const subtotal = totalAmount;
+  const deliveryFee = Number(req.body.deliveryFee ?? 0);
+  const tax = Number(req.body.tax ?? 0);
+  const finalTotal = subtotal + deliveryFee + tax;
 
   const order = await Order.create({
     _id: orderId,
     userId: req.user.id,
+    customerName: req.body.customerName || req.user.name || '',
+    customerEmail: req.body.customerEmail || req.user.email || '',
+    customerPhone: req.body.customerPhone || '',
     restaurantId,
+    restaurantName: restaurant.name || '',
+    restaurantAddress: restaurant.address || '',
+    restaurantLocation: restaurant.location,
     restaurantOwnerId: restaurant.ownerId,
     items: resolvedItems,
-    totalAmount,
+    subtotal,
+    deliveryFee,
+    tax,
+    totalAmount: finalTotal,
     deliveryAddress: deliveryAddress.trim(),
+    specialInstructions: (req.body.specialInstructions || '').trim(),
+    paymentMethod: req.body.paymentMethod || 'COD',
+    paymentStatus: 'PENDING',
     idempotencyKey: idempotencyKey || undefined,
     status: 'RESTAURANT_PENDING',
     statusHistory: [{ status: 'CREATED' }, { status: 'RESTAURANT_PENDING' }],
@@ -120,10 +173,21 @@ export const createOrder = asyncHandler(async (req, res) => {
         data: {
           orderId: orderId.toString(),
           userId: req.user.id,
+          customerName: req.body.customerName || req.user.name || '',
+          customerEmail: req.body.customerEmail || req.user.email || '',
+          customerPhone: req.body.customerPhone || '',
           restaurantId,
-          totalAmount,
+          restaurantName: restaurant.name || '',
+          restaurantAddress: restaurant.address || '',
+          restaurantLocation: restaurant.location,
+          restaurantOwnerId: restaurant.ownerId,
+          totalAmount: finalTotal,
+          subtotal,
+          deliveryFee,
+          tax,
           items: resolvedItems,
           deliveryAddress: deliveryAddress.trim(),
+          specialInstructions: (req.body.specialInstructions || '').trim(),
           createdAt: new Date()
         },
         status: 'PENDING',
@@ -132,6 +196,8 @@ export const createOrder = asyncHandler(async (req, res) => {
       }
     ]
   });
+
+  await broadcastOrderStatus(order);
 
   res.status(201).json({ success: true, data: order });
 });
@@ -154,13 +220,20 @@ export const getMyOrders = asyncHandler(async (req, res) => {
 export const getRestaurantOrders = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const status = req.query.status;
+
+  const query = req.user.role === 'admin' && req.query.all === 'true'
+    ? {}
+    : { restaurantOwnerId: req.user.id };
+
+  if (status) query.status = status;
 
   const [orders, total] = await Promise.all([
-    Order.find({ restaurantOwnerId: req.user.id })
+    Order.find(query)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
-    Order.countDocuments({ restaurantOwnerId: req.user.id })
+    Order.countDocuments(query)
   ]);
 
   res.status(200).json({ success: true, data: orders, page, limit, total });
@@ -181,14 +254,153 @@ export const getAgentOrders = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: orders, page, limit, total });
 });
 
+export const getAllOrdersAdmin = asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const status = req.query.status;
+
+  const query = {};
+  if (status) query.status = status;
+
+  const [orders, total] = await Promise.all([
+    Order.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    Order.countDocuments(query)
+  ]);
+
+  res.status(200).json({ success: true, data: orders, page, limit, total });
+});
+
+export const restaurantDecision = asyncHandler(async (req, res) => {
+  const { action, estimatedPrepTime, reason } = req.body;
+  const orderId = req.params.id;
+
+  if (!['ACCEPT', 'REJECT'].includes(action)) {
+    return res.status(400).json({ success: false, message: "action must be 'ACCEPT' or 'REJECT'" });
+  }
+
+  const order = await Order.findById(orderId);
+  if (!order) {
+    return res.status(404).json({ success: false, message: 'Order not found' });
+  }
+
+  const isAllowed = order.restaurantOwnerId === req.user.id || req.user.role === 'admin';
+  if (!isAllowed) {
+    return res.status(403).json({ success: false, message: 'You are not authorized to manage this restaurant order' });
+  }
+
+  if (order.status !== 'RESTAURANT_PENDING') {
+    return res.status(409).json({ success: false, message: `Order cannot be decided in status ${order.status}` });
+  }
+
+  if (action === 'ACCEPT') {
+    const prepTime = Number(estimatedPrepTime) || 30;
+
+    // 1. Transition to RESTAURANT_ACCEPTED
+    const acceptResult = await applyTransition(orderId, 'RESTAURANT_ACCEPTED', {
+      extraFields: { estimatedPrepTime: prepTime },
+      event: {
+        topic: 'restaurant-accepted',
+        eventType: 'RESTAURANT_ACCEPTED',
+        data: {
+          orderId: order._id.toString(),
+          restaurantId: order.restaurantId,
+          restaurantLocation: order.restaurantLocation,
+          estimatedPrepTime: prepTime,
+          userId: order.userId
+        }
+      }
+    });
+
+    if (acceptResult.result === TRANSITION_RESULT.INVALID) {
+      return res.status(409).json({ success: false, message: acceptResult.reason || 'Failed to accept order' });
+    }
+
+    await broadcastOrderStatus(acceptResult.order);
+
+    // 2. Automatically chain to AGENT_ASSIGNMENT_PENDING
+    const assignPending = await applyTransition(orderId, 'AGENT_ASSIGNMENT_PENDING');
+    const finalOrder = assignPending.order || acceptResult.order;
+    await broadcastOrderStatus(finalOrder);
+
+    return res.status(200).json({ success: true, data: finalOrder });
+  }
+
+  if (action === 'REJECT') {
+    const rejectReason = reason || 'Restaurant rejected the order';
+
+    const rejectResult = await applyTransition(orderId, 'CANCELLED', {
+      extraFields: { lastFailureReason: `RESTAURANT_REJECTED:${rejectReason}` },
+      event: {
+        topic: 'restaurant-rejected',
+        eventType: 'RESTAURANT_REJECTED',
+        data: {
+          orderId: order._id.toString(),
+          restaurantId: order.restaurantId,
+          userId: order.userId,
+          reason: rejectReason
+        }
+      }
+    });
+
+    if (rejectResult.result === TRANSITION_RESULT.INVALID) {
+      return res.status(409).json({ success: false, message: rejectResult.reason || 'Failed to reject order' });
+    }
+
+    await broadcastOrderStatus(rejectResult.order);
+
+    return res.status(200).json({ success: true, data: rejectResult.order });
+  }
+});
+
+export const restaurantUpdateStatus = asyncHandler(async (req, res) => {
+  const { status } = req.body;
+  const orderId = req.params.id;
+
+  if (!['PREPARING', 'READY_FOR_PICKUP'].includes(status)) {
+    return res.status(400).json({ success: false, message: "Status must be 'PREPARING' or 'READY_FOR_PICKUP'" });
+  }
+
+  const order = await Order.findById(orderId);
+  if (!order) {
+    return res.status(404).json({ success: false, message: 'Order not found' });
+  }
+
+  const isAllowed = order.restaurantOwnerId === req.user.id || req.user.role === 'admin';
+  if (!isAllowed) {
+    return res.status(403).json({ success: false, message: 'You are not authorized to update this order' });
+  }
+
+  const topic = status === 'PREPARING' ? 'order-preparing' : 'order-ready-for-pickup';
+  const eventType = status === 'PREPARING' ? 'ORDER_PREPARING' : 'ORDER_READY_FOR_PICKUP';
+
+  const result = await applyTransition(orderId, status, {
+    event: {
+      topic,
+      eventType,
+      data: {
+        orderId: order._id.toString(),
+        restaurantId: order.restaurantId,
+        userId: order.userId,
+        status
+      }
+    }
+  });
+
+  if (result.result === TRANSITION_RESULT.INVALID) {
+    return res.status(409).json({ success: false, message: result.reason || 'Invalid status transition' });
+  }
+
+  await broadcastOrderStatus(result.order);
+
+  res.status(200).json({ success: true, data: result.order });
+});
+
 // BUG-016: visibility scoped strictly by relationship to the order —
 // customer must own it, restaurant must own the restaurant it was placed
-// against, agent must be the one assigned to it. No role gets a blanket
-// "any order" pass anymore.
-
-// Internal authorization used by the API Gateway before a Socket.IO client
-// is allowed to join an order tracking room. The browser never calls this
-// endpoint directly; internalOnly protects it with the service secret.
+// against, agent must be the one assigned to it.
 export const authorizeTrackingAccess = asyncHandler(async (req, res) => {
   const orderId = req.params.id;
   const userId = req.headers['x-user-id'];
@@ -233,7 +445,8 @@ export const getOrderById = asyncHandler(async (req, res) => {
   const isOwner =
     (role === 'customer' && order.userId === userId) ||
     (role === 'restaurant' && order.restaurantOwnerId === userId) ||
-    (role === 'agent' && order.assignedAgentId === userId);
+    (role === 'agent' && order.assignedAgentId === userId) ||
+    role === 'admin';
 
   if (!isOwner) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
@@ -263,7 +476,7 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
   // — when assignedAgentId was null, the check was skipped entirely, so
   // ANY authenticated agent could claim and update an order nobody had
   // been assigned to yet. It must always equal the requester, full stop.
-  if (order.assignedAgentId !== req.user.id) {
+  if (order.assignedAgentId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'You are not the agent assigned to this order' });
   }
 
@@ -289,6 +502,8 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: result.reason || 'Invalid status transition' });
   }
 
+  await broadcastOrderStatus(result.order);
+
   res.status(200).json({ success: true, data: result.order });
 });
 
@@ -299,7 +514,7 @@ export const cancelOrder = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Order not found' });
   }
 
-  if (order.userId !== req.user.id) {
+  if (order.userId !== req.user.id && req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
 
@@ -328,6 +543,8 @@ export const cancelOrder = asyncHandler(async (req, res) => {
       message: result.reason || 'Order can no longer be cancelled'
     });
   }
+
+  await broadcastOrderStatus(result.order);
 
   res.status(200).json({ success: true, data: result.order });
 });

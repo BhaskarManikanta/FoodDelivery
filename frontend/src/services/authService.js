@@ -21,15 +21,29 @@ export const loginUser = async (formData) => {
 };
 
 export const getProfile = async (token) => {
+  const config = token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+  const response = await api.get("/users/profile", config);
+  return response.data;
+};
 
-  const response = await api.get(
-    "/users/profile",
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
+export const updateProfile = async (data) => {
+  const response = await api.put("/users/profile", data);
+  return response.data;
+};
 
+export const getAllUsers = async (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  const url = query ? `/users?${query}` : "/users";
+  const response = await api.get(url);
+  return response.data;
+};
+
+export const getUserStats = async () => {
+  const response = await api.get("/users/stats");
+  return response.data;
+};
+
+export const updateUserRole = async (userId, role) => {
+  const response = await api.patch(`/users/${userId}/role`, { role });
   return response.data;
 };

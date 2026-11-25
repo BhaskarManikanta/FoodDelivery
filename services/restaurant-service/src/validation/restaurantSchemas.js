@@ -4,8 +4,12 @@ export const createRestaurantSchema = Joi.object({
   name: Joi.string().trim().min(1).required(),
   cuisine: Joi.string().trim().min(1).required(),
   address: Joi.string().trim().min(1).required(),
-  image: Joi.string().uri().allow('').optional(),
+  image: Joi.string().allow('').optional(),
   isOpen: Joi.boolean().optional(),
+  rating: Joi.number().min(1).max(5).optional(),
+  deliveryTime: Joi.string().trim().optional(),
+  costForTwo: Joi.number().positive().optional(),
+  openingHours: Joi.string().trim().optional(),
   // BUG-024: required, not optional — a restaurant can't be dispatched to
   // without a real location, so it shouldn't be possible to create one
   // that silently defaults to (0, 0).
@@ -19,8 +23,12 @@ export const updateRestaurantSchema = Joi.object({
   name: Joi.string().trim().min(1),
   cuisine: Joi.string().trim().min(1),
   address: Joi.string().trim().min(1),
-  image: Joi.string().uri().allow(''),
+  image: Joi.string().allow(''),
   isOpen: Joi.boolean(),
+  rating: Joi.number().min(1).max(5),
+  deliveryTime: Joi.string().trim(),
+  costForTwo: Joi.number().positive(),
+  openingHours: Joi.string().trim(),
   location: Joi.object({
     lat: Joi.number().min(-90).max(90),
     lng: Joi.number().min(-180).max(180)
@@ -32,8 +40,10 @@ export const menuItemSchema = Joi.object({
   description: Joi.string().allow('').optional(),
   price: Joi.number().positive().required(),
   category: Joi.string().trim().optional(),
-  image: Joi.string().uri().allow('').optional(),
-  available: Joi.boolean().optional()
+  image: Joi.string().allow('').optional(),
+  available: Joi.boolean().optional(),
+  isVeg: Joi.boolean().optional(),
+  rating: Joi.number().min(1).max(5).optional()
 });
 
 export const updateMenuItemSchema = Joi.object({
@@ -41,8 +51,10 @@ export const updateMenuItemSchema = Joi.object({
   description: Joi.string().allow(''),
   price: Joi.number().positive(),
   category: Joi.string().trim(),
-  image: Joi.string().uri().allow(''),
-  available: Joi.boolean()
+  image: Joi.string().allow(''),
+  available: Joi.boolean(),
+  isVeg: Joi.boolean(),
+  rating: Joi.number().min(1).max(5)
 }).min(1);
 
 // Generic Express middleware factory — validates req.body against a Joi

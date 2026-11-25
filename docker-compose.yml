@@ -147,6 +147,7 @@ services:
       - restaurant-service
       - order-service
       - agent-service
+      - notification-service
 
     networks:
       - food-delivery-network
@@ -255,11 +256,13 @@ services:
 
     environment:
       PORT: 4005
+      MONGO_URI: mongodb://mongodb:27017/food_delivery
       JWT_SECRET: ${JWT_SECRET}
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: kafka:9092
 
     depends_on:
+      - mongodb
       - redis
       - kafka
 

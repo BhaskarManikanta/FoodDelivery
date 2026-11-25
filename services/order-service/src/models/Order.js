@@ -44,14 +44,30 @@ const outboxEventSchema = new mongoose.Schema(
 const orderSchema = new mongoose.Schema(
   {
     userId: { type: String, required: true },
+    customerName: { type: String, default: '' },
+    customerEmail: { type: String, default: '' },
+    customerPhone: { type: String, default: '' },
     restaurantId: { type: String, required: true },
+    restaurantName: { type: String, default: '' },
+    restaurantAddress: { type: String, default: '' },
+    restaurantLocation: {
+      lat: { type: Number },
+      lng: { type: Number }
+    },
     // Captured from Restaurant Service at creation time so Order Service
     // can scope restaurant-role visibility (BUG-016) without having to
     // call another service on every read.
     restaurantOwnerId: { type: String, required: true },
     items: { type: [orderItemSchema], required: true },
+    subtotal: { type: Number, default: 0 },
+    deliveryFee: { type: Number, default: 40 },
+    tax: { type: Number, default: 0 },
     totalAmount: { type: Number, required: true },
     deliveryAddress: { type: String, required: true },
+    specialInstructions: { type: String, default: '' },
+    paymentMethod: { type: String, default: 'COD' },
+    paymentStatus: { type: String, default: 'PENDING' },
+    estimatedPrepTime: { type: Number, default: 30 },
     status: {
       type: String,
       enum: ALL_STATES,

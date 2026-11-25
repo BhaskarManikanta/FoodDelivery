@@ -144,3 +144,110 @@ export const profile = asyncHandler(async (req, res) => {
     data: user
   });
 });
+
+export const updateProfile = asyncHandler(async (req, res) => {
+  const { name, phone, address } = req.body;
+  const user = await User.findById(req.user.id);
+
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+  }
+
+  if (name !== undefined) user.name = name;
+  if (phone !== undefined) user.phone = phone;
+  if (address !== undefined) user.address = address;
+
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    data: {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      phone: user.phone,
+      address: user.address
+    }
+  });
+});
+
+export const getAllUsers = asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const role = req.query.role;
+  const search = req.query.search;
+
+  const query = {};
+  if (role) query.role = role;
+  if (search) {
+    query.$or = [
+      { name: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } }
+    ];
+  }
+
+  const [users, total] = await Promise.all([
+    User.find(query)
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit),
+    User.countDocuments(query)
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: users,
+    page,
+    limit,
+    total
+  });
+});
+
+export const updateUserRole = asyncHandler(async (req, res) => {
+  const { role } = req.body;
+  if (!['customer', 'restaurant', 'agent', 'admin'].includes(role)) {
+    return res.status(400).json({ success: false, message: 'Invalid role' });
+  }
+
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  user.role = role;
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    data: {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    }
+  });
+});
+
+export const getUserStats = asyncHandler(async (req, res) => {
+  const [totalUsers, totalCustomers, totalRestaurants, totalAgents] = await Promise.all([
+    User.countDocuments(),
+    User.countDocuments({ role: 'customer' }),
+    User.countDocuments({ role: 'restaurant' }),
+    User.countDocuments({ role: 'agent' })
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: {
+      totalUsers,
+      totalCustomers,
+      totalRestaurants,
+      totalAgents
+    }
+  });
+});

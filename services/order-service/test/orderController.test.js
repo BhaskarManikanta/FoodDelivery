@@ -44,7 +44,7 @@ const makeFakeOrderModel = () => ({
 const OrderModel = makeFakeOrderModel();
 mock.module('../src/models/Order.js', { defaultExport: OrderModel });
 
-const { createOrder, updateOrderStatus, cancelOrder } = await import('../src/controllers/orderController.js');
+const { createOrder, updateOrderStatus, cancelOrder, restaurantDecision, restaurantUpdateStatus } = await import('../src/controllers/orderController.js');
 
 const fakeRes = () => {
   const res = { statusCode: null, body: null };
@@ -274,4 +274,100 @@ test('a customer cannot cancel someone else\'s order', async () => {
   await cancelOrder(req, res, (e) => { if (e) throw e; });
 
   assert.equal(res.statusCode, 403);
+});
+
+test('restaurant owner can accept a pending order with estimated prep time', async () => {
+  await OrderModel.create({
+    _id: 'order-to-accept',
+    userId: 'user-1',
+    restaurantId: 'rest-1',
+    restaurantOwnerId: 'owner-1',
+    restaurantLocation: { lat: 17.385, lng: 78.486 },
+    status: 'RESTAURANT_PENDING',
+    statusHistory: [{ status: 'RESTAURANT_PENDING' }],
+    outbox: []
+  });
+
+  const req = {
+    user: { id: 'owner-1', role: 'restaurant' },
+    params: { id: 'order-to-accept' },
+    body: { action: 'ACCEPT', estimatedPrepTime: 25 }
+  };
+  const res = fakeRes();
+  await restaurantDecision(req, res, (e) => { if (e) throw e; });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.status, 'AGENT_ASSIGNMENT_PENDING');
+  assert.equal(res.body.data.estimatedPrepTime, 25);
+  assert.ok(res.body.data.outbox.some((e) => e.eventType === 'RESTAURANT_ACCEPTED'));
+});
+
+test('restaurant owner can reject a pending order with reason', async () => {
+  await OrderModel.create({
+    _id: 'order-to-reject',
+    userId: 'user-1',
+    restaurantId: 'rest-1',
+    restaurantOwnerId: 'owner-1',
+    status: 'RESTAURANT_PENDING',
+    statusHistory: [{ status: 'RESTAURANT_PENDING' }],
+    outbox: []
+  });
+
+  const req = {
+    user: { id: 'owner-1', role: 'restaurant' },
+    params: { id: 'order-to-reject' },
+    body: { action: 'REJECT', reason: 'Kitchen at full capacity' }
+  };
+  const res = fakeRes();
+  await restaurantDecision(req, res, (e) => { if (e) throw e; });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.status, 'CANCELLED');
+  assert.ok(res.body.data.lastFailureReason.includes('Kitchen at full capacity'));
+  assert.ok(res.body.data.outbox.some((e) => e.eventType === 'RESTAURANT_REJECTED'));
+});
+
+test('unauthorized restaurant owner cannot decide another restaurant\'s order', async () => {
+  await OrderModel.create({
+    _id: 'order-other-restaurant',
+    userId: 'user-1',
+    restaurantId: 'rest-1',
+    restaurantOwnerId: 'owner-1',
+    status: 'RESTAURANT_PENDING',
+    statusHistory: [{ status: 'RESTAURANT_PENDING' }],
+    outbox: []
+  });
+
+  const req = {
+    user: { id: 'different-owner', role: 'restaurant' },
+    params: { id: 'order-other-restaurant' },
+    body: { action: 'ACCEPT' }
+  };
+  const res = fakeRes();
+  await restaurantDecision(req, res, (e) => { if (e) throw e; });
+
+  assert.equal(res.statusCode, 403);
+});
+
+test('restaurant owner can update order preparation status', async () => {
+  await OrderModel.create({
+    _id: 'order-prep',
+    userId: 'user-1',
+    restaurantId: 'rest-1',
+    restaurantOwnerId: 'owner-1',
+    status: 'AGENT_ASSIGNED',
+    statusHistory: [{ status: 'AGENT_ASSIGNED' }],
+    outbox: []
+  });
+
+  const req = {
+    user: { id: 'owner-1', role: 'restaurant' },
+    params: { id: 'order-prep' },
+    body: { status: 'PREPARING' }
+  };
+  const res = fakeRes();
+  await restaurantUpdateStatus(req, res, (e) => { if (e) throw e; });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.status, 'PREPARING');
 });

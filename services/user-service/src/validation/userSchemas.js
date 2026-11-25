@@ -22,7 +22,13 @@ export const registerStaffSchema = Joi.object({
   name: Joi.string().trim().min(1).max(100).required(),
   email: Joi.string().trim().email().required(),
   password: Joi.string().min(6).max(72).required(),
-  role: Joi.string().valid('restaurant', 'agent').required()
+  role: Joi.string().valid('restaurant', 'agent', 'admin').required()
+});
+
+export const updateProfileSchema = Joi.object({
+  name: Joi.string().trim().min(1).max(100),
+  phone: Joi.string().trim().allow('', null),
+  address: Joi.string().trim().allow('', null)
 });
 
 export const loginSchema = Joi.object({

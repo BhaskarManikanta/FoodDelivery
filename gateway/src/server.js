@@ -151,6 +151,14 @@ app.use(
   })
 );
 
+app.use(
+  '/api/notifications',
+  createProxyMiddleware({
+    target: serviceTarget(process.env.NOTIFICATION_SERVICE_URL, '/api/notifications'),
+    changeOrigin: true
+  })
+);
+
 app.use(notFoundHandler);
 app.use(errorHandler);
 
@@ -175,6 +183,12 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id} (user ${socket.user.id})`);
+
+  // Join user room so individual push notifications reach this connection
+  socket.join(`user:${socket.user.id}`);
+  if (socket.user.role === 'restaurant') {
+    socket.join(`restaurant:${socket.user.id}`);
+  }
 
   // BUG-003: used to accept any orderId with zero ownership check, letting
   // one user subscribe to another user's order tracking/status events.
@@ -220,13 +234,19 @@ io.on('connection', (socket) => {
   });
 });
 
-trackingSubscriber.subscribe('tracking-updates', 'order-status-updates', (err) => {
-  if (err) {
-    console.error('[Gateway] Failed to subscribe to tracking channels:', err.message);
-  } else {
-    console.log('[Gateway] Subscribed to tracking-updates and order-status-updates');
+trackingSubscriber.subscribe(
+  'tracking-updates',
+  'order-status-updates',
+  'notifications-updates',
+  'restaurant-orders',
+  (err) => {
+    if (err) {
+      console.error('[Gateway] Failed to subscribe to Redis channels:', err.message);
+    } else {
+      console.log('[Gateway] Subscribed to tracking, status, notifications, and restaurant-orders');
+    }
   }
-});
+);
 
 trackingSubscriber.on('message', (channel, message) => {
   let payload;
@@ -241,6 +261,11 @@ trackingSubscriber.on('message', (channel, message) => {
     io.to(`order:${payload.orderId}`).emit('tracking:update', payload);
   } else if (channel === 'order-status-updates') {
     io.to(`order:${payload.orderId}`).emit('order:status', payload);
+  } else if (channel === 'notifications-updates') {
+    io.to(`user:${payload.userId}`).emit('notification:new', payload.notification);
+  } else if (channel === 'restaurant-orders') {
+    io.to(`user:${payload.restaurantOwnerId}`).emit('restaurant:new-order', payload);
+    io.to(`restaurant:${payload.restaurantOwnerId}`).emit('restaurant:new-order', payload);
   }
 });
 

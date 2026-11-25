@@ -55,16 +55,25 @@ const handleOrderCreated = async (data) => {
     return;
   }
 
-  // Auto-accept for now (documented demo behavior — see BUG-022 in
-  // README). Swap this for a real "pending -> owner taps accept/reject"
-  // flow later; the event contract already supports it.
-  await publishEvent('restaurant-accepted', 'RESTAURANT_ACCEPTED', {
-    orderId,
-    restaurantId,
-    restaurantLocation: restaurant.location
-  });
+  // Notify the restaurant owner in real-time via Redis pub/sub
+  // The restaurant staff reviews incoming orders on their dashboard and manually accepts or rejects
+  await redis.publish(
+    'restaurant-orders',
+    JSON.stringify({
+      restaurantOwnerId: restaurant.ownerId,
+      restaurantId: restaurant._id.toString(),
+      orderId,
+      items: data.items,
+      totalAmount: data.totalAmount,
+      deliveryAddress: data.deliveryAddress,
+      specialInstructions: data.specialInstructions,
+      customerName: data.customerName,
+      customerEmail: data.customerEmail,
+      createdAt: data.createdAt || new Date().toISOString()
+    })
+  );
 
-  console.log(`[Restaurant Service] Accepted order ${orderId}`);
+  console.log(`[Restaurant Service] Order ${orderId} routed to restaurant ${restaurant._id} for manual acceptance`);
 };
 
 export const runConsumer = async () => {

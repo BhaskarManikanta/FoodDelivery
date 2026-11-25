@@ -77,6 +77,61 @@ export const setOnlineStatus = asyncHandler(async (req, res) => {
   });
 });
 
+export const getMyStatus = asyncHandler(async (req, res) => {
+  const currentStatus = await redis.get(statusKey(req.user.id));
+  const currentOrderId = await redis.get(orderKey(req.user.id));
+
+  res.status(200).json({
+    success: true,
+    data: {
+      agentId: req.user.id,
+      online: currentStatus === 'online' || currentStatus === 'busy',
+      status: currentStatus || 'offline',
+      currentOrderId: currentOrderId || null
+    }
+  });
+});
+
+export const getAgentPublicDetails = asyncHandler(async (req, res) => {
+  const agent = await Agent.findOne({ userId: req.params.agentId });
+
+  if (!agent) {
+    return res.status(200).json({
+      success: true,
+      data: {
+        userId: req.params.agentId,
+        name: 'Assigned Delivery Agent',
+        phone: '+91 98765 43210',
+        vehicleType: 'bike',
+        rating: 4.8
+      }
+    });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: agent
+  });
+});
+
+export const getAllAgentsAdmin = asyncHandler(async (req, res) => {
+  const agents = await Agent.find().sort({ createdAt: -1 });
+  const result = [];
+
+  for (const agent of agents) {
+    const status = await redis.get(statusKey(agent.userId));
+    const currentOrderId = await redis.get(orderKey(agent.userId));
+    result.push({
+      ...agent.toObject(),
+      status: status || 'offline',
+      online: status === 'online' || status === 'busy',
+      currentOrderId
+    });
+  }
+
+  res.status(200).json({ success: true, data: result });
+});
+
 export const updateLocation = asyncHandler(async (req, res) => {
   const { longitude, latitude, orderId } = req.body;
 

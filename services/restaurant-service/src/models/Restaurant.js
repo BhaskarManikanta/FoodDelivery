@@ -26,6 +26,14 @@ const menuItemSchema = new mongoose.Schema(
     available: {
       type: Boolean,
       default: true
+    },
+    isVeg: {
+      type: Boolean,
+      default: false
+    },
+    rating: {
+      type: Number,
+      default: 4.5
     }
   },
   { _id: true }
@@ -58,6 +66,22 @@ const restaurantSchema = new mongoose.Schema(
     isOpen: {
       type: Boolean,
       default: true
+    },
+    rating: {
+      type: Number,
+      default: 4.5
+    },
+    deliveryTime: {
+      type: String,
+      default: '30-40 mins'
+    },
+    costForTwo: {
+      type: Number,
+      default: 400
+    },
+    openingHours: {
+      type: String,
+      default: '09:00 AM - 11:00 PM'
     },
     // BUG-024: no default — a restaurant with no location set should be
     // visibly "not deliverable" rather than silently resolving to (0, 0),
