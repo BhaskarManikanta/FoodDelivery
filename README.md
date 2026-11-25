@@ -2,7 +2,31 @@
 
 An enterprise-grade, event-driven food ordering and delivery microservices platform built with **Node.js, Express, MongoDB, Redis, Apache Kafka (KRaft), Socket.IO, React 19, Redux Toolkit, and Docker Compose**.
 
-Designed with production architectural patterns: **Choreography-based Saga** with compensating actions, **Transactional Outbox Pattern** for reliable Kafka publishing, **Idempotent Consumers**, **Dead-Letter Queues (DLQ)**, **Redis GEO** with atomic Lua nearest-agent reservation, and full **Multi-Role Frontend Dashboards** (Customer, Restaurant Staff, Delivery Agent, and Admin).
+Designed with production architectural patterns: **Choreography-based Saga** with compensating actions, **Transactional Outbox Pattern** for reliable Kafka publishing, **Idempotent Consumers**, **Dead-Letter Queues (DLQ)**, **Redis GEO** with atomic Lua nearest-agent reservation, and full **Multi-Role Frontend Portals** (Customer, Restaurant Staff, Delivery Agent, and Admin).
+
+---
+
+## Application Showcase & Screenshots
+
+### Customer Ordering Experience
+| Kitchen Discovery (Home) | Digital Menu & Veg/Non-Veg Filters |
+|---|---|
+| ![Kitchen Discovery](screenshots/Home.png) | ![Restaurant Menu](screenshots/Menu.png) |
+
+| Checkout, Address & COD Breakdown | Live Order GPS Tracking |
+|---|---|
+| ![Checkout & Review](screenshots/Checkout.png) | ![Live Order Tracking](screenshots/Tracking.png) |
+
+---
+
+### Multi-Role Operations & Fleet Portals
+| Restaurant Partner Portal (`/restaurant/dashboard`) | Delivery Partner Hub (`/agent/dashboard`) |
+|---|---|
+| ![Restaurant Partner Portal](screenshots/RestaurantDashboard.png) | ![Delivery Partner Hub](screenshots/AgentDashboard.png) |
+
+| Admin Command Center (`/admin/dashboard`) | Secure Role-Based Authentication (`/login`) |
+|---|---|
+| ![Admin Command Center](screenshots/AdminDashboard.png) | ![Login Screen](screenshots/Login.png) |
 
 ---
 
@@ -51,7 +75,7 @@ Designed with production architectural patterns: **Choreography-based Saga** wit
 
 | Service | Port (Internal) | Responsibilities & Tech Stack |
 |---|---|---|
-| **API Gateway** | `8080` (Host) | Single reverse-proxy entry point. JWT authentication & role authorization. Redis-backed rate limiting (10 req/min for auth, 100 req/min general). Socket.IO server bridging Redis Pub/Sub channels to client WebSocket rooms. |
+| **API Gateway** | `8080` (Host) | Single reverse-proxy entry point. JWT authentication & role authorization. Redis-backed rate limiting (10 req/min for auth, 100 req/min general). Socket.IO server bridging Redis Pub/Sub channels to client WebSocket rooms (`user:<id>` and `restaurant:<id>`). |
 | **User Service** | `5001` | User registration, bcrypt password hashing, JWT issuing. Profile retrieval and updates. Role-based access control (`customer`, `restaurant`, `agent`, `admin`). Admin user management and role delegation. |
 | **Restaurant Service** | `5002` | Restaurant profiles, cuisine indexing, delivery times, cost-for-two, ratings. Menu CRUD with categories, prices, veg/non-veg tags, and photos. Real-time Redis pub/sub dispatch to restaurant owners. |
 | **Order Service** | `5003` | Order creation with server-side pricing calculation, address verification, and delivery fees. Explicit state machine engine. Order idempotency. MongoDB Transactional Outbox pattern with background Kafka relay. Restaurant manual decision handling. |
@@ -122,30 +146,49 @@ Every order status transition is validated against a strict state machine table 
 
 ## Multi-Role Portals & Dashboards
 
-### 1. Customer Experience
-- Browse curated restaurants with cuisine filtering and live search.
-- Interactive digital menu with Veg / Non-Veg tags and instant price updates.
-- Redux-backed Cart with delivery fee calculation and Cash on Delivery (COD).
-- Live Order Tracking page with interactive milestone state tracker, driver details, and streaming GPS map coordinates via WebSockets.
-- In-App Notifications modal with real-time popup alerts and unread counters.
+### 1. Customer Ordering Portal
+![Home](screenshots/Home.png)
+- **Kitchen Discovery**: Browse curated restaurants with real-time search and filter chips (All Cuisines, Indian, Italian, Chinese, American).
+- **Interactive Menu**: View dishes categorized by section, inspect Veg/Non-Veg indicators, view pricing, ratings, and add to cart with real-time Redux state synchronization.
+![Menu](screenshots/Menu.png)
+- **Checkout & Review**: Configure delivery address, add cooking instructions, inspect subtotal and delivery charges, and place order via Cash on Delivery (COD).
+![Checkout](screenshots/Checkout.png)
+- **Live Order Tracking**: Visual milestone progress, driver vehicle info, and streaming GPS map coordinates via WebSockets.
+- **In-App Notifications**: Real-time bell modal with live updates and unread counts.
 
-### 2. Restaurant Owner Dashboard (`/restaurant/dashboard`)
-- Real-time incoming order queue streamed via WebSockets & Redis Pub/Sub.
-- Order review: customer info, phone, ordered items, special instructions, and total bill.
-- **Manual Decision**: Accept order with estimated preparation time (e.g., 25 mins) or Reject with specific cancellation reason.
-- Preparation management: advance orders to `PREPARING` and `READY_FOR_PICKUP`.
-- View historic kitchen orders and active preparation statuses.
+---
 
-### 3. Delivery Agent Dashboard (`/agent/dashboard`)
-- Toggle online / offline duty status with instant Redis GEO synchronization.
-- Active order cards showing restaurant pickup address, customer drop-off address, and contact numbers.
-- **Live GPS Simulator**: One-click coordinate updates that broadcast live latitude/longitude pings to customer tracking rooms via Redis Pub/Sub.
-- Milestone action buttons: `Confirm Pickup`, `Start Delivery (Out for Delivery)`, `Mark Delivered`, and `Report Delivery Issue`.
+### 2. Restaurant Partner Portal (`/restaurant/dashboard`)
+![Restaurant Partner Portal](screenshots/RestaurantDashboard.png)
+- **Real-Time Incoming Queue**: Incoming orders stream directly to the kitchen via Redis Pub/Sub and Socket.IO rooms (`restaurant:<id>`).
+- **Kitchen Inspection**: View customer details, contact number, ordered dishes, special instructions, and total bill.
+- **Manual Decision Flow**:
+  - **Accept & Start Prep**: Staff specifies preparation time (e.g., 25 mins), moving order to `RESTAURANT_ACCEPTED` and kicking off agent assignment.
+  - **Decline Order**: Staff provides rejection reason, cleanly terminating the saga and alerting the customer.
+- **Kitchen Controls**: Advance preparation status from `PREPARING` to `READY_FOR_PICKUP`.
+- **Operating Status**: Toggle kitchen availability (`Accepting Orders (OPEN)` / `Temporarily Closed`).
+
+---
+
+### 3. Delivery Partner Hub (`/agent/dashboard`)
+![Delivery Partner Hub](screenshots/AgentDashboard.png)
+- **Duty Toggle**: Toggle online/offline status with instant Redis GEO synchronization.
+- **Active Assignment Card**: Shows restaurant pickup address, customer destination, and contact numbers.
+- **Live GPS Simulator**: One-click coordinate updates (`Ping Location` and `Auto Simulate Drive`) broadcasting live latitude/longitude pings to customer tracking rooms via Redis Pub/Sub.
+- **Delivery Milestones**:
+  - `Confirm Pickup from Kitchen` → Moves status to `PICKED_UP`.
+  - `Start Delivery (Out for Delivery)` → Moves status to `OUT_FOR_DELIVERY`.
+  - `Confirm Delivery` → Moves status to `DELIVERED` and releases agent reservation.
+  - `Report Failure` → Triggers compensating cancellation workflow.
+
+---
 
 ### 4. Admin Command Center (`/admin/dashboard`)
-- Platform-wide statistics: total users, active orders, platform revenue, registered delivery partners.
-- Global order audit feed: inspect all system orders, filter by state (`RESTAURANT_PENDING`, `AGENT_ASSIGNED`, `DELIVERED`, etc.).
-- Role Management: inspect all registered users and promote accounts across `customer`, `restaurant`, `agent`, and `admin` roles.
+![Admin Command Center](screenshots/AdminDashboard.png)
+- **System Metrics**: Total Orders, Registered Restaurants, Active Delivery Agents, and Total Platform Users.
+- **Service Mesh Health**: Real-time status indicators for API Gateway, Redis & GEO Engine, and Kafka (KRaft) Cluster.
+- **Live Order Stream**: Audit all orders flowing through the platform with live status badges.
+- **Role Management**: Inspect registered users and promote/demote roles between `customer`, `restaurant`, `agent`, and `admin`.
 
 ---
 
